@@ -24,9 +24,11 @@ regular_bullet_speed = 4.25
 regular_bullet_radius = 0.1
 rapid_bullet_speed = 7.25
 grenade_detonation_time = 1.5
+grenade_max_throw_range = 10
 grenade_blast_radius = 2
 grenade_starting_rotation_rate = 0.16974
 bottle_bomb_detonation_time = 1.5
+bottle_bomb_max_throw_range = 10
 bottle_bomb_blast_radius = 1
 bottle_bomb_bubble_radius = 1
 bottle_bomb_starting_rotation_rate = grenade_starting_rotation_rate
@@ -239,22 +241,47 @@ def distance_to_self_center(coordinates):
     self_tank = get_self_tank()
     return distance((self_tank["x"], self_tank["y"]), coordinates)
 
-def get_trajectory_linestring_points(bullet, max_bounces, is_sniper):
+def get_trajectory_linestring_points(bullet):
     global walls, debugging
-    if not is_sniper:
-        previous_position_distance = distance((bullet["prev_x"], bullet["prev_y"]), (bullet["x"], bullet["y"]))
-        bullet_speed = previous_position_distance * bullet_speed_conversion_factor
-        total_path_length = regular_bullet_speed * dodging_time_interval * pixels_per_block if abs(bullet_speed - regular_bullet_speed) < abs(bullet_speed - rapid_bullet_speed) else rapid_bullet_speed * dodging_time_interval * pixels_per_block # in pixels
-        dx, dy = (bounce_check_distance_in_pixels / previous_position_distance)*(bullet["x"] - bullet["prev_x"]), (bounce_check_distance_in_pixels / previous_position_distance)*(bullet["y"] - bullet["prev_y"])
-    else:
+
+    if bullet["type"] == "sniperShoot":
         total_path_length = float('inf')
         if bullet["rotation"] < 0: actual_rotation = -bullet["rotation"] # Above the horizontal
         else: actual_rotation = 2 * math.pi - bullet["rotation"] # Below the horizontal
         if actual_rotation < 0 or actual_rotation > 2 * math.pi:
-            print("CAUTION: Calculated sniper rotation angle not between 0 to 2pi")
+            print("ANOMALY: Calculated sniper rotation angle not between 0 to 2pi; ignoring sniper")
             return "failure"
-        
         dx, dy = math.cos(actual_rotation) * bounce_check_distance_in_pixels, math.sin(actual_rotation) * bounce_check_distance_in_pixels
+        max_bounces = 0
+
+    elif bullet["type"] == "grenadeBullet" or bullet["type"] == "bottleBombBullet":
+        starting_rotation_rate = grenade_starting_rotation_rate if bullet["type"] == "grenadeBullet" else bottle_bomb_starting_rotation_rate
+        max_throw_range_in_pixels = grenade_max_throw_range * pixels_per_block if bullet["type"] == "grenadeBullet" else bottle_bomb_max_throw_range * pixels_per_block
+        detonation_time = grenade_detonation_time if bullet["type"] == "grenadeBullet" else bottle_bomb_detonation_time
+        max_starting_speed_in_pixels = 2 * max_throw_range_in_pixels / detonation_time
+        max_deceleration = max_starting_speed_in_pixels / detonation_time
+
+        fraction_of_motion_completed = abs(bullet["prev_rotation"] - bullet["rotation"]) / starting_rotation_rate
+        if fraction_of_motion_completed > 1:
+            print("ANOMALY: Detected projectile sprite rotation rate greater than maximum (starting) rotation rate; assuming projectile is at start of motion")
+            fraction_of_motion_completed = 1
+        starting_speed = distance((bullet["prev_x"], bullet["prev_y"]), (bullet["x"], bullet["y"])) / (1 - fraction_of_motion_completed)
+        deceleration = (starting_speed / max_starting_speed_in_pixels) * max_deceleration
+        time_to_detonation = fraction_of_motion_completed * detonation_time
+        total_path_length = starting_speed * time_to_detonation - 0.5 * deceleration * time_to_detonation**2
+
+        dx, dy = (bounce_check_distance_in_pixels / previous_position_distance)*(bullet["x"] - bullet["prev_x"]), (bounce_check_distance_in_pixels / previous_position_distance)*(bullet["y"] - bullet["prev_y"])
+
+    elif bullet["type"] == "bubble": return "bubble"
+
+    else:
+        previous_position_distance = distance((bullet["prev_x"], bullet["prev_y"]), (bullet["x"], bullet["y"]))
+        bullet_speed = previous_position_distance * bullet_speed_conversion_factor
+        total_path_length = regular_bullet_speed * dodging_time_interval * pixels_per_block if abs(bullet_speed - regular_bullet_speed) < abs(bullet_speed - rapid_bullet_speed) else rapid_bullet_speed * dodging_time_interval * pixels_per_block # in pixels
+        dx, dy = (bounce_check_distance_in_pixels / previous_position_distance)*(bullet["x"] - bullet["prev_x"]), (bounce_check_distance_in_pixels / previous_position_distance)*(bullet["y"] - bullet["prev_y"])
+        if bullet["type"] == "volcanoBullet": max_bounces = 9
+        elif bullet["type"] == "rocketBullet": max_bounces = 0
+        else: max_bounces = 1 # Is a regular, rapid, shotgun, or minigun bullet
 
     linestring_points = [(bullet["x"], bullet["y"])]
     next_point = (bullet["x"], bullet["y"])
@@ -271,12 +298,12 @@ def get_trajectory_linestring_points(bullet, max_bounces, is_sniper):
                 get_wall_edge_output = get_wall_edge_between(current_point, next_point)
                 if get_wall_edge_output[0] == "horizontal": dx, dy = dx, -dy
                 elif get_wall_edge_output[0] == "vertical": dx, dy = -dx, dy
-                else: print("CAUTION: Detected bounce but get_wall_edge_between algorithm failed to locate wall face direction")
+                else: print("ANOMALY: Detected bounce but failed to determine wall face direction; stopping bullet trajectory at bounce point")
                 current_point = next_point
                 next_point = (current_point[0] + dx, current_point[1] + dy)
     
     linestring_points.append(current_point)
-    return linestring_points
+    return (linestring_points, fraction_of_motion_completed) if bullet["type"] == "grenadeBullet" or bullet["type"] == "bottleBombBullet" else linestring_points
 
 def dodge():
     global walls, enemy_projectiles, coordinate_changes, directions, dodging_time_interval, debugging
@@ -286,13 +313,13 @@ def dodge():
 
     for projectile in enemy_projectiles:
         if distance_to_self_center((projectile["x"], projectile["y"])) < threat_range_in_pixels:
-            if projectile["type"] == "bullet":
-                bullet_linestring_points = get_trajectory_linestring_points(projectile, 1, False)
-                if bullet_linestring_points != "failure":
+            bullet_linestring_points = get_trajectory_linestring_points(projectile)
+            if bullet_linestring_points != "failure":
+                if projectile["type"] == "bullet":
                     for i in range(0, len(bullet_linestring_points) - 1):
                         bullet_linestring = geo.LineString([bullet_linestring_points[i], bullet_linestring_points[i + 1]])
                         bullet_linestring.buffer(regular_bullet_radius)
-                        bullets.append(bullet_linestring)    
+                        bullets.append(bullet_linestring)
 
     is_first_region = True
     for region_type in [bullets, grenades, bottle_bombs, bombs, rockets, snipers, geo_walls]:
@@ -367,7 +394,7 @@ while True:
                 goal_direction = astar(self_grid_coordinates, closest_enemy_grid_coordinates, wall_grid_coordinates)
                 
                 if goal_direction != "timeout" and goal_direction != None: print("A-star algorithm wants to go " + goal_direction)
-                else: print("CAUTION: A-star algorithm timed out")
+                else: print("ANOMALY: A-star algorithm timed out; using previously calculated direction")
 
                 if debugging:
                     print("Self grid coordinates:", self_grid_coordinates)
@@ -415,7 +442,7 @@ while True:
 
         main_loop_end_time = time.time()
         main_loop_time = main_loop_end_time - main_loop_start_time
-        if main_loop_time > 0.25: print("CAUTION: Unusually long main loop iteration time (" + str(main_loop_time) + " seconds)")
+        if main_loop_time > 0.25: print("ANOMALY: Unusually long main loop iteration time (" + str(main_loop_time) + " seconds)")
         if debugging: print()
             
         time.sleep(2)
