@@ -60,11 +60,13 @@ return tank_data;
 """
 
 js_script_projectiles_r = """
-let bullet_keys = ['bullet r', 'rocketBullet r', 'grenadeBullet r', 'bottleBombBullet r', 'bubble r_0'];
+let bullet_keys = ['bullet r', 'rocketBullet r', 'bubble r_0'];
 let sniper_key = 'sniperShoot_r';
 let bomb_key = 'volcanoBullet r';
+let grenade_key = 'grenadeBullet r';
+let bottle_bomb_key = 'bottlebombBullet r';
 
-let projectiles = window.game.world.children.filter(obj => bullet_keys.includes(obj.key) || obj.key === sniper_key);
+let projectiles = window.game.world.children.filter(obj => bullet_keys.includes(obj.key) || obj.key === sniper_key || obj.key === bomb_key || obj.key === grenade_key || obj.key === bottle_bomb_key);
 let projectile_data = projectiles.map(proj => {
     let data = {
         type: proj.key.replace(/[\s_]?r(_0)?$/, ''),
@@ -73,7 +75,7 @@ let projectile_data = projectiles.map(proj => {
         prev_x: proj.previousPosition ? proj.previousPosition.x : null,
         prev_y: proj.previousPosition ? proj.previousPosition.y : null
     };
-    if (proj.key === sniper_key || proj.key === bomb_key) {
+    if (proj.key === sniper_key || proj.key === bomb_key || proj.key === grenade_key || proj.key === bottle_bomb_key) {
         data.rotation = proj.worldRotation;
         data.prev_rotation = proj.previousRotation !== undefined ? proj.previousRotation : null;
     }
@@ -83,20 +85,22 @@ return projectile_data;
 """
 
 js_script_projectiles_b = """
-let bullet_keys = ['bullet b', 'rocketBullet b', 'grenadeBullet b', 'bottleBombBullet b', 'bubble b_0'];
+let bullet_keys = ['bullet b', 'rocketBullet b', 'bubble b_0'];
 let sniper_key = 'sniperShoot_b';
 let bomb_key = 'volcanoBullet b';
+let grenade_key = 'grenadeBullet b';
+let bottle_bomb_key = 'bottlebombBullet b';
 
-let projectiles = window.game.world.children.filter(obj => bullet_keys.includes(obj.key) || obj.key === sniper_key);
+let projectiles = window.game.world.children.filter(obj => bullet_keys.includes(obj.key) || obj.key === sniper_key || obj.key === bomb_key || obj.key === grenade_key || obj.key === bottle_bomb_key);
 let projectile_data = projectiles.map(proj => {
     let data = {
-        type: proj.key.replace(/[\s_]?r(_0)?$/, ''),
+        type: proj.key.replace(/[\s_]?b(_0)?$/, ''),
         x: Math.round(proj.worldPosition.x),
         y: Math.round(proj.worldPosition.y),
         prev_x: proj.previousPosition ? proj.previousPosition.x : null,
         prev_y: proj.previousPosition ? proj.previousPosition.y : null
     };
-    if (proj.key === sniper_key || proj.key === bomb_key) {
+    if (proj.key === sniper_key || proj.key === bomb_key || proj.key === grenade_key || proj.key === bottle_bomb_key) {
         data.rotation = proj.worldRotation;
         data.prev_rotation = proj.previousRotation !== undefined ? proj.previousRotation : null;
     }
@@ -254,23 +258,30 @@ def get_trajectory_linestring_points(bullet):
         dx, dy = math.cos(actual_rotation) * bounce_check_distance_in_pixels, math.sin(actual_rotation) * bounce_check_distance_in_pixels
         max_bounces = 0
 
-    elif bullet["type"] == "grenadeBullet" or bullet["type"] == "bottleBombBullet":
+    elif bullet["type"] == "grenadeBullet" or bullet["type"] == "bottlebombBullet":
         starting_rotation_rate = grenade_starting_rotation_rate if bullet["type"] == "grenadeBullet" else bottle_bomb_starting_rotation_rate
         max_throw_range_in_pixels = grenade_max_throw_range * pixels_per_block if bullet["type"] == "grenadeBullet" else bottle_bomb_max_throw_range * pixels_per_block
         detonation_time = grenade_detonation_time if bullet["type"] == "grenadeBullet" else bottle_bomb_detonation_time
-        max_starting_speed_in_pixels = 2 * max_throw_range_in_pixels / detonation_time
+        max_starting_speed_in_pixels = 2 * max_throw_range_in_pixels / detonation_time # Max speed is twice the average speed
         max_deceleration = max_starting_speed_in_pixels / detonation_time
 
         fraction_of_motion_completed = abs(bullet["prev_rotation"] - bullet["rotation"]) / starting_rotation_rate
         if fraction_of_motion_completed > 1:
             print("ANOMALY: Detected projectile sprite rotation rate greater than maximum (starting) rotation rate; assuming projectile is at start of motion")
             fraction_of_motion_completed = 1
-        starting_speed = distance((bullet["prev_x"], bullet["prev_y"]), (bullet["x"], bullet["y"])) / (1 - fraction_of_motion_completed)
+        previous_position_distance = distance((bullet["prev_x"], bullet["prev_y"]), (bullet["x"], bullet["y"]))
+        current_speed_in_blocks_per_second = previous_position_distance * bullet_speed_conversion_factor
+        starting_speed = (current_speed_in_blocks_per_second / (1 - fraction_of_motion_completed)) * pixels_per_block # Starting speed in blocks per second * pixels per block
         deceleration = (starting_speed / max_starting_speed_in_pixels) * max_deceleration
         time_to_detonation = fraction_of_motion_completed * detonation_time
         total_path_length = starting_speed * time_to_detonation - 0.5 * deceleration * time_to_detonation**2
+        if debugging:
+            print("Total path length in blocks:", total_path_length / pixels_per_block)
+            print("Starting speed of projectile in blocks per second:", starting_speed / pixels_per_block)
+            print("Calculated range of projectile in blocks:", (starting_speed / max_starting_speed_in_pixels) * (max_throw_range_in_pixels / pixels_per_block))
 
         dx, dy = (bounce_check_distance_in_pixels / previous_position_distance)*(bullet["x"] - bullet["prev_x"]), (bounce_check_distance_in_pixels / previous_position_distance)*(bullet["y"] - bullet["prev_y"])
+        max_bounces = float('inf')
 
     elif bullet["type"] == "bubble": return "bubble"
 
@@ -287,7 +298,7 @@ def get_trajectory_linestring_points(bullet):
     next_point = (bullet["x"], bullet["y"])
     bounces = 0
 
-    for i in range(1, int(total_path_length / bounce_check_distance_in_pixels) + 1):
+    for i in range(1, int(total_path_length / bounce_check_distance_in_pixels)):
         current_point = next_point
         next_point = (current_point[0] + dx, current_point[1] + dy)
         if is_in_wall(next_point):
@@ -311,13 +322,23 @@ def dodge():
 
     for wall in walls: geo_walls.append(geo.box(wall["x"], wall["y"], wall["x"] + pixels_per_block, wall["y"] + pixels_per_block))
 
+    # --- CONSTRUCTING REGION TO AVOID ---
+
     for projectile in enemy_projectiles:
         if distance_to_self_center((projectile["x"], projectile["y"])) < threat_range_in_pixels:
-            bullet_linestring_points = get_trajectory_linestring_points(projectile)
-            if bullet_linestring_points != "failure":
+            linestring_points = get_trajectory_linestring_points(projectile)
+            if debugging: print("Projectile linestring points:", linestring_points)
+            if linestring_points != "failure":
                 if projectile["type"] == "bullet":
-                    for i in range(0, len(bullet_linestring_points) - 1):
-                        bullet_linestring = geo.LineString([bullet_linestring_points[i], bullet_linestring_points[i + 1]])
+                    for i in range(0, len(linestring_points) - 1):
+                        bullet_linestring = geo.LineString([linestring_points[i], linestring_points[i + 1]])
+                        bullet_linestring.buffer(regular_bullet_radius)
+                        bullets.append(bullet_linestring)
+                
+                # REVERT AFTER DEBUGGING
+                elif projectile["type"] == "grenadeBullet" or projectile["type"] == "bottleBombBullet":
+                    for i in range(0, len(linestring_points[0]) - 1):
+                        bullet_linestring = geo.LineString([linestring_points[0][i], linestring_points[0][i + 1]])
                         bullet_linestring.buffer(regular_bullet_radius)
                         bullets.append(bullet_linestring)
 
@@ -335,9 +356,9 @@ def dodge():
 
         # Plot bullet linestring points
         for bullet in bullets:
-            bullet_linestring_points = list(bullet.coords)
-            x_bullet_points = [point[0] for point in bullet_linestring_points]
-            y_bullet_points = [-point[1] for point in bullet_linestring_points]
+            linestring_points = list(bullet.coords)
+            x_bullet_points = [point[0] for point in linestring_points]
+            y_bullet_points = [-point[1] for point in linestring_points]
             ax.scatter(x_bullet_points, y_bullet_points, color='red', label='Bullet Points')
 
         # Plot wall coordinates
@@ -347,6 +368,8 @@ def dodge():
 
         plt.legend()
         plt.show()
+    
+    # TODO: --- DECIDING MOVEMENT DIRECTION ---
 
     return "none"
 
